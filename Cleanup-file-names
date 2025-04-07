@@ -1,0 +1,137 @@
+#!/bin/bash
+
+set -e
+
+# Demande du répertoire source et destination à l'utilisateur
+read -p "Veuillez entrer le chemin du répertoire source : " SOURCE
+read -p "Veuillez entrer le chemin du répertoire de destination : " DEST
+
+# Vérification de l'existence des répertoires
+if [ ! -d "$SOURCE" ]; then
+  echo "Erreur : Le répertoire source n'existe pas."
+  exit 1
+fi
+
+if [ ! -d "$DEST" ]; then
+  echo "Erreur : Le répertoire de destination n'existe pas."
+  exit 1
+fi
+
+# Dossier temporaire
+TMP_DIR="/media/VOLUME1/$(date +%Y%m%d%H%M%S)_temp"  # Temp directory
+echo "🗂 Création du dossier temporaire : $TMP_DIR"
+mkdir -p "$TMP_DIR"
+
+# Option de verbosité (afficher les détails)
+VERBOSE=true
+
+# Fonction pour nettoyer les chemins en ne remplaçant que les caractères illégaux
+sanitize_path() {
+  local path="$1"
+  local filename=$(basename "$path")
+  local dirname=$(dirname "$path")
+
+  # Extraire le nom et extension sans couper les parties importantes
+  local name="${filename%.*}"
+  local ext="${filename##*.}"
+
+  # Si le nom contient un point (pas d'extension ou autre), ne pas couper
+  if [[ "$filename" == "$name" ]]; then
+    clean_filename=$(echo "$filename" | sed 's/[\/:*?"<>|\\]/-/g') 
+  else
+    # Remplacer uniquement les caractères illégaux dans le nom de fichier (sans toucher à l'extension)
+    clean_name=$(echo "$name" | sed 's/[\/:*?"<>|\\]/-/g')
+    clean_filename="${clean_name}.${ext}"
+  fi
+
+  # Nettoyer les noms de dossiers aussi
+  clean_dir=$(echo "$dirname" | sed 's/[\/:*?"<>|\\]/-/g')
+
+  # Renvoie le chemin nettoyé sans ajouter de préfixe inutile
+  echo "$clean_dir/$clean_filename"
+}
+
+export -f sanitize_path
+export SOURCE
+export TMP_DIR
+export VERBOSE
+
+# Affichage des fichiers déjà présents dans la destination
+echo "📑 Vérification des fichiers déjà présents dans la destination :"
+find "$DEST" -type f | while read -r dest_file; do
+  if [ "$VERBOSE" = true ]; then
+    echo "  - $dest_file (déjà présent dans la destination)"
+  fi
+done
+
+echo "🔄 Traitement des fichiers à nettoyer :"
+# Exclure les fichiers commençant par "._" et les répertoires "@eaDir"
+find "$SOURCE" -type f ! -name '._*' ! -path '*/@eaDir/*' | while read -r filepath; do
+  # Vérification si le fichier contient un caractère illégal
+  if echo "$filepath" | grep -q '[/:*?"<>|\\.]'; then
+    rel_path="${filepath#$SOURCE}"
+    sanitized_path=$(sanitize_path "$rel_path")
+    
+    # Enlever un éventuel préfixe "./" du chemin (correction de la commande sed)
+    sanitized_path=$(echo "$sanitized_path" | sed 's#^\.\/##')
+
+    temp_path="$TMP_DIR/$sanitized_path"
+    dest_path="$DEST/$sanitized_path"
+
+    # Corriger le double slash
+    dest_path=$(echo "$dest_path" | sed 's#//#/#g')
+
+    # Vérifier si le fichier existe déjà dans la destination
+    if [ -f "$dest_path" ]; then
+      # Comparer la taille des fichiers source et destination
+      source_size=$(stat -c %s "$filepath")
+      dest_size=$(stat -c %s "$dest_path")
+
+      if [ "$source_size" -ne "$dest_size" ]; then
+        if [ "$VERBOSE" = true ]; then
+          echo "📄 Fichier existant, mais taille différente, remplacement nécessaire : $filepath -> $sanitized_path"
+        fi
+
+        # Créer les répertoires nécessaires dans le dossier temporaire et la destination
+        mkdir -p "$(dirname "$temp_path")"
+        mkdir -p "$(dirname "$dest_path")"
+
+        # Copie le fichier dans le dossier temporaire avec rsync
+        rsync -av --ignore-existing "$filepath" "$temp_path"
+
+        # Copie du fichier vers la destination avec rsync
+        rsync -av --ignore-existing "$temp_path" "$dest_path"
+
+        # Supprimer le fichier temporaire après la copie vers la destination
+        rm -f "$temp_path"
+      else
+        if [ "$VERBOSE" = true ]; then
+          echo "📑 Le fichier existe déjà dans la destination et a la même taille, ignoré : $dest_path"
+        fi
+      fi
+    else
+      # Si le fichier n'existe pas dans la destination, on le copie
+      mkdir -p "$(dirname "$temp_path")"
+      mkdir -p "$(dirname "$dest_path")"
+
+      # Copie le fichier dans le dossier temporaire avec rsync
+      rsync -av --ignore-existing "$filepath" "$temp_path"
+
+      # Copie du fichier vers la destination avec rsync
+      rsync -av --ignore-existing "$temp_path" "$dest_path"
+
+      # Supprimer le fichier temporaire après la copie vers la destination
+      rm -f "$temp_path"
+    fi
+  else
+    if [ "$VERBOSE" = true ]; then
+      echo "📑 Aucun nettoyage nécessaire pour : $filepath"
+    fi
+  fi
+done
+
+# Suppression du dossier temporaire après traitement de tous les fichiers
+echo "🧹 Suppression du dossier temporaire : $TMP_DIR"
+rm -rf "$TMP_DIR"
+
+echo "✅ Traitement terminé avec succès."
